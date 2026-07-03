@@ -105,7 +105,7 @@ static void spmv_csr_shifted_rows(const CSRMatrix& A,
                                   const std::vector<double>& x,
                                   std::vector<double>& y) {
     const std::size_t n = A.n;
-    y.assign(n, 0.0);
+    // removed initialization of y since it is overwritten at the end of the following for loop
 
     for (std::size_t i = 0; i < n; ++i) {
         const std::size_t src_row = (i + n - row_shift) % n;

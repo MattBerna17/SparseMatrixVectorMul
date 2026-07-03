@@ -205,10 +205,15 @@ static std::uint64_t make_coprime_stride(std::uint64_t raw, std::size_t n) {
     return stride;
 }
 
-static GeneratedMatrix generate_matrix(std::size_t n,
-                                       std::uint64_t nz_total,
-                                       std::uint64_t seed,
-                                       const std::string& mode) {
+
+
+
+
+
+/**
+ * Function to generate the G matrix
+ */
+static GeneratedMatrix generate_matrix(std::size_t n, std::uint64_t nz_total, std::uint64_t seed, const std::string& mode) {
     GeneratedMatrix G;
     G.A.n = n;
 

@@ -11,8 +11,35 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "threadpool.hpp"
 
 // Deterministic PRNG / mixing
+
+// to avoid false sharing when changing values
+struct alignas(64) padded_double { double value = 0.0; };
+struct alignas(64) padded_uint64 { std::uint64_t value = 0; };
+
+/** Struct to store the scheduling parameters: if the scheduling is dynamic and, in that case, the chunk size */
+struct SchedulingParameters {
+    bool is_dynamic = false;
+    std::uint64_t chunk_size = 0;
+};
+
+
+/**
+ * Function to get the static division of the N values of an array/matrix for the t-th thread out of the T threads
+ */
+std::pair<std::uint64_t, std::uint64_t> get_static_range(std::uint64_t N, std::uint64_t T, std::uint64_t t) {
+    std::uint64_t base = N/T;
+    std::uint64_t remainder = N%T;
+    std::uint64_t start = t * base + std::min(t, remainder);
+    std::uint64_t end = start + base + (t < remainder ? 1 : 0);
+    return {start, end};
+}
+
+
+
+
 
 class SplitMix64 {
 public:
@@ -61,17 +88,30 @@ static bool read_arg_str(int argc, char** argv, const std::string& name, std::st
     return false;
 }
 
+static std::uint64_t checksum_vector(const std::vector<double>& x, ThreadPool &tp) {
+    std::uint64_t checksum = 0;
+    std::vector<padded_uint64> partial_checksums(tp.num_threads);
 
-static std::uint64_t checksum_vector(const std::vector<double>& x) {
-    std::uint64_t acc = 0;
+    for (std::uint64_t t = 0; t < tp.num_threads; t++) {
+        auto [start, end] = get_static_range(x.size(), tp.num_threads, t);
 
-    for (std::size_t i = 0; i < x.size(); ++i) {
-        std::uint64_t bits = 0;
-        std::memcpy(&bits, &x[i], sizeof(double));
-        acc ^= SplitMix64::mix(bits ^ SplitMix64::mix(i));
+        tp.enqueue([&x, t, &partial_checksums, start, end] {
+            std::uint64_t local_checksum = 0;
+            for (std::uint64_t i = start; i < end; i++) {
+                std::uint64_t bits = 0;
+                std::memcpy(&bits, &x[i], sizeof(double));
+                local_checksum ^= SplitMix64::mix(bits ^ SplitMix64::mix(i));
+            }
+            partial_checksums[t].value = local_checksum;
+        });
+    }
+    tp.barrier();
+
+    for (std::uint64_t t = 0; t < tp.num_threads; t++) {
+        checksum ^= partial_checksums[t].value;
     }
 
-    return acc;
+    return checksum;
 }
 
 static void dump_vector(const std::string& path, const std::vector<double>& x) {
@@ -99,6 +139,7 @@ static void usage(const char* prog) {
         << "  -n   Matrix size, NxN\n"
         << "  -nz  Total number of nonzeros\n"
         << "  -m   Matrix mode: regular or irregular\n"
+        << "  -t   Number of threads in the thread pool\n"
         << "  -s   Optional seed, default 111\n"
         << "  --dump-vector FILE\n"
         << "       Optional output file for the final normalized vector\n";
