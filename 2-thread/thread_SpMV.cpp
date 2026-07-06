@@ -17,24 +17,26 @@
 
 //
 // Command line:
-//   -n  N        matrix size, NxN
-//   -nz K        total number of nonzeros
-//   -m  mode     regular | irregular
-//   -s  seed     optional seed, default 111
-//   --dump-vector FILE
-//                 optional dump of the final normalized vector
-//   -t T         number of threads to use
+//   -n  N          matrix size, NxN
+//   -nz K          total number of nonzeros
+//   -m  mode       regular | irregular
+//   -s  seed       optional seed, default 111
+//   --dump-vector  FILE
+//                  optional dump of the final normalized vector
+//   -t T           number of threads to use
+//   --scheduling   static | dynamic
+//   --chunk-size   number of elements to compute contained in a chunk (task assigned to a thread). ONLY WORKS WITH DYNAMIC SCHEDULING, with static chunk-size = N / T with remainder for the first N % T threads
 //
 // Minimal build:
 //   g++ -O3 -std=c++20 -I . -Wall thread_SpMV.cpp -o thread
 //
 // Examples:
-//   ./thread -n 500000 -nz 20000000 -m regular -t 2
-//   ./thread -n 500000 -nz 20000000 -m irregular
-//   ./thread -n 5000 -nz 20000 -m irregular --dump-vector thread_vec.dump
+//   ./thread -n 500000 -nz 20000000 -m regular -t 2 --scheduling static
+//   ./thread -n 500000 -nz 20000000 -m irregular -t 4 --scheduling dynamic --chunk-size 1024
+//   ./thread -n 5000 -nz 20000 -m irregular -t 2 --scheduling dynamic --chunk-size 1024 --dump-vector thread_vec.dump
 //
 // Notes:
-//   - Matrix generation is not included in computation time.
+//   - Matrix generation is not included in computation time. --> not optimized, has its own timer, different from the iterative algorithm.
 //   - The computation uses a fixed number of iterations.
 //   - The main workload is the irregular case.
 //

@@ -1,5 +1,9 @@
 #pragma once
 
+
+#include <omp.h>
+
+
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +15,12 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+
+// to avoid false sharing when changing values
+struct alignas(64) padded_double { double value = 0.0; };
+struct alignas(64) padded_uint64 { std::uint64_t value = 0; };
+
 
 // Deterministic PRNG / mixing
 
