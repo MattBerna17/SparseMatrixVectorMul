@@ -110,7 +110,7 @@ static void normalize(std::vector<double>& x, std::uint64_t num_chunks, std::uin
 }
 
 
-// Computes the epoch parameter
+// computes the epoch parameter
 static std::size_t compute_shift_rows(std::size_t n) {
     std::size_t s = n / 16 + 17;
     if ((s % 2) == 0) ++s;
