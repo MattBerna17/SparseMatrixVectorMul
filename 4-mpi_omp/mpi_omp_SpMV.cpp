@@ -126,6 +126,9 @@ static void local_spmv_csr(int local_n, const std::vector<std::uint64_t>& local_
 }
 
 // rotate and transfer global results logic
+// A' = PA with P permutation matrix
+// A'x = (PA)x = P(Ax)
+// i'm applying the permutation on the result of Ax y = P(Ax) instead of first applying permutation to A and then producing y = A'x
 static void rotate_vector(const std::vector<double>& global_out, std::vector<double>& y, std::size_t row_shift, std::uint64_t num_chunks, std::uint64_t chunk_size) {
     std::uint64_t n = global_out.size();
     for (std::uint64_t chunk = 0; chunk < num_chunks; chunk++) {
@@ -135,7 +138,7 @@ static void rotate_vector(const std::vector<double>& global_out, std::vector<dou
         #pragma omp task default(none) shared(global_out, y) firstprivate(start, end, row_shift, n)
         {
             for (std::uint64_t i = start; i < end; i++) {
-                y[(i + row_shift) % n] = global_out[i]; // !!!!!!!!!! to check
+                y[(i + row_shift) % n] = global_out[i];
             }
         }
     }
@@ -154,6 +157,7 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
     // initialize and distribute data
     
     // divide data across the ranks (just define the number of rows to send to each rank)
+    // each rank computes the values on its own. otherwise, if we used if (rank == 0) and then MPI_Scatter over the number of local values to work on, we would have significant cost increase because of the MPI call, which is far more expensive than the local computation of the values
     std::vector<int> row_counts(num_ranks), row_displacements(num_ranks);
     int reminder = static_cast<int>(n % num_ranks);
     int curr_displacement = 0;
@@ -167,6 +171,7 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
     
     // count the number of non zero numbers for each rank based on the previous rows assigned to each rank
     std::vector<int> nnz_counts(num_ranks), nnz_displacements(num_ranks);
+    // here, we use the scatter afterwards because only rank 0 has the full A matrix
     if (rank == 0) {
         for (int i = 0; i < num_ranks; i++) {
             std::uint64_t start_nnz = global_A.row_ptr[row_displacements[i]]; // initial row pointer
@@ -186,10 +191,11 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
     std::vector<std::uint64_t> local_row_ptr(local_n + 1);
 
     // distribute original A matrix's data across ranks
+    // each rank only receives the A matrix's data it has to work on (using nnz_counts and nnz_displacements)
     MPI_Scatterv(rank == 0 ? global_A.values.data() : nullptr, nnz_counts.data(), nnz_displacements.data(), MPI_DOUBLE, local_values.data(), local_nnz, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Scatterv(rank == 0 ? global_A.col_idx.data() : nullptr, nnz_counts.data(), nnz_displacements.data(), MPI_UINT32_T, local_col_idx.data(), local_nnz, MPI_UINT32_T, 0, MPI_COMM_WORLD);
 
-    // send overlapping row_ptr data
+    // send overlapping row_ptr data (last row_ptr of rank i is the same of the first row_ptr of rank i+1)
     std::vector<int> ptr_counts(num_ranks), ptr_displacements(num_ranks);
     if (rank == 0) {
         for (int i = 0; i < num_ranks; i++) {
@@ -200,12 +206,13 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
     MPI_Scatterv(rank == 0 ? global_A.row_ptr.data() : nullptr, ptr_counts.data(), ptr_displacements.data(), MPI_UINT64_T, local_row_ptr.data(), local_n + 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
 
     std::uint64_t offset = local_row_ptr[0];
+    // each local row ptr has to start from zero
     for (int i = 0; i <= local_n; i++) {
-        local_row_ptr[i] -= offset; // local
+        local_row_ptr[i] -= offset;
     }
 
 
-    // Phase 1: initialize the vector used by the iterative method (SEQUENTIAL)
+    // Phase 1: initialize the x vector locally (each rank has the same seed and they do not share the rng, so the generation is the same for all the ranks)
     std::vector<double> x(n);
     std::vector<double> y(n);
     std::vector<double> local_out(local_n);
@@ -250,9 +257,9 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
                 local_spmv_csr(local_n, local_row_ptr, local_col_idx, local_values, x, local_out, num_local_chunks, chunk_size);
 
                 // gather results into a unique global result
-                MPI_Allgatherv(local_out.data(), local_n, MPI_DOUBLE, global_out.data(), row_counts.data(), row_displacements.data(), MPI_DOUBLE, MPI_COMM_WORLD);
+                MPI_Allgatherv(local_out.data(), local_n, MPI_DOUBLE, global_out.data(), row_counts.data(), row_displacements.data(), MPI_DOUBLE, MPI_COMM_WORLD); // inside omp single, so THREAD_FUNNELED is ok
                 
-                // distribute logic with shift rotation via tasks
+                // rotate global_out vector in y according to row_shift parameter
                 rotate_vector(global_out, y, row_shift, num_chunks, chunk_size);
                 
                 normalize(y, num_chunks, chunk_size);
