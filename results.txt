@@ -1,0 +1,56 @@
+# SEQUENTIAL
+./seq -n 500000 -nz 20000000 -m regular
+rayleigh=5.601504662506887
+checksum=0xa9a02afd04fba066
+Time (sec) = 45.130750
+
+./seq -n 500000 -nz 20000000 -m irregular
+rayleigh=4.223260535478325
+checksum=0xadd2edef7e35a4f9
+Time (sec) = 44.817638
+
+
+# THREAD
+./thread -n 500000 -nz 20000000 -m regular -t 2 --scheduling static
+rayleigh=5.601504662506857
+checksum=0x943e80ac1881f43a
+Time (sec) = 27.479155
+
+./thread -n 500000 -nz 20000000 -m irregular -t 4 --scheduling dynamic --chunk-size 1024
+rayleigh=4.223260535478288
+checksum=0xa73279f3e936d04e
+Time (sec) = 15.088016
+
+
+# OMP
+./omp -n 500000 -nz 20000000 -m regular -t 2 --chunk-size 1024
+rayleigh=5.601504662506892
+checksum=0xe398803d9254b371
+Time (sec) = 23.398880
+
+./omp -n 500000 -nz 20000000 -m irregular -t 4 --chunk-size 256
+rayleigh=4.223260535478210
+checksum=0xfe23a2364565dc83
+Time (sec) = 19.502136
+
+
+# MPI+OMP
+mpirun -n 2 ./mpi_omp -n 500000 -nz 20000000 -m regular -t 4 --chunk-size 1024
+rayleigh=5.601504662506892
+checksum=0xe398803d9254b371
+Time (sec)
+computation=26.995165
+global_spmv=22.673591
+global_comm=1.182777
+global_rotate=1.949383
+global_normalize=1.115217
+
+mpirun -n 4 ./mpi_omp -n 500000 -nz 20000000 -m irregular -t 2 --chunk-size 256
+rayleigh=4.223260535478210
+checksum=0xfe23a2364565dc83
+Time (sec)
+computation=19.526064
+global_spmv=15.464127
+global_comm=2.217604
+global_rotate=1.907652
+global_normalize=0.684675

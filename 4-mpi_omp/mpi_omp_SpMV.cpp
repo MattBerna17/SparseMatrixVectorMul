@@ -135,7 +135,7 @@ static void rotate_vector(const std::vector<double>& global_out, std::vector<dou
         #pragma omp task default(none) shared(global_out, y) firstprivate(start, end, row_shift, n)
         {
             for (std::uint64_t i = start; i < end; i++) {
-                y[(i + row_shift) % n] = global_out[i]; // !!!!!!!!!! to check
+                y[(i + row_shift) % n] = global_out[i]; // P(Ax) = P(A)x
             }
         }
     }
@@ -146,25 +146,64 @@ struct IterativeResult {
     double rayleigh             = 0.0;
     std::uint64_t checksum      = 0;
     std::size_t final_row_shift = 0;
+    double global_spmv = 0.0;
+    double global_comm = 0.0;
+    double global_rotate = 0.0;
+    double global_normalize = 0.0;
 };
 
-static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const CSRMatrix& global_A, std::uint64_t n, std::uint64_t seed, std::uint64_t num_threads, std::uint64_t chunk_size, std::vector<double>* final_vector = nullptr) {
+static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const CSRMatrix& global_A, std::uint64_t nz, std::uint64_t n, std::uint64_t seed, std::uint64_t num_threads, std::uint64_t chunk_size, std::vector<double>* final_vector = nullptr) {
     const std::size_t shift_rows = compute_shift_rows(n);
     
     // initialize and distribute data
     
     // divide data across the ranks (just define the number of rows to send to each rank)
     std::vector<int> row_counts(num_ranks), row_displacements(num_ranks);
-    int reminder = static_cast<int>(n % num_ranks);
-    int curr_displacement = 0;
-    for (int i = 0; i < num_ranks; i++) {
-        row_counts[i] = static_cast<int>(n / num_ranks) + (i < reminder ? 1 : 0);
-        row_displacements[i] = curr_displacement;
-        curr_displacement += row_counts[i];
+    // int reminder = static_cast<int>(n % num_ranks);
+    // int curr_displacement = 0;
+    // for (int i = 0; i < num_ranks; i++) {
+    //     row_counts[i] = static_cast<int>(n / num_ranks) + (i < reminder ? 1 : 0);
+    //     row_displacements[i] = curr_displacement;
+    //     curr_displacement += row_counts[i];
+    // }
+    // int local_n = row_counts[rank]; // each rank has its own portion of data to locally work on
+
+    if (rank == 0) {
+        // starting from the row 0, assign each row to a rank
+        // the optimal partitioning is assigning desired_nnz_per_rank nnzs to each rank (not always possibile if A is generated using an irregular pattern)
+        std::uint64_t curr_row = 0;
+        std::uint64_t curr_nnz = 0;
+        std::uint64_t desired_nnz_per_rank = nz / num_ranks;
+        // std::vector<uint64_t> row_nnz(n);
+        std::uint64_t curr_rank = 0;
+        for (size_t i = 0; i < n; i++) {
+            auto row_nnz = global_A.row_ptr[i+1] - global_A.row_ptr[i];
+            if (curr_nnz + row_nnz > desired_nnz_per_rank && curr_rank < num_ranks - 1) {
+                // custom function to return absolute difference in case of uint64
+                auto abs_diff = [](std::uint64_t a, std::uint64_t b) -> std::uint64_t {
+                    return a > b ? a - b : b - a;
+                };
+                if (abs_diff(desired_nnz_per_rank, curr_nnz) < abs_diff(desired_nnz_per_rank, curr_nnz + row_nnz)) {
+                    row_counts[curr_rank] = i - curr_row;
+                    row_displacements[curr_rank] = curr_row;
+                    curr_row = i;
+                    curr_rank += 1;
+                    curr_nnz = 0;
+                }
+            }
+            curr_nnz += row_nnz;
+        }
+        // for last rank (get the remaining rows)
+        row_counts[curr_rank] = n - curr_row;
+        row_displacements[curr_rank] = curr_row;
     }
+
+    // no scatter because later on i need the complete row_counts and row_displacements arrays (easier to use broadcast in this case)
+    MPI_Bcast(row_counts.data(), num_ranks, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(row_displacements.data(), num_ranks, MPI_INT, 0, MPI_COMM_WORLD);
     
-    int local_n = row_counts[rank]; // each rank has its own portion of data to locally work on
-    
+    int local_n = row_counts[rank];
+
     // count the number of non zero numbers for each rank based on the previous rows assigned to each rank
     std::vector<int> nnz_counts(num_ranks), nnz_displacements(num_ranks);
     if (rank == 0) {
@@ -203,6 +242,13 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
     for (int i = 0; i <= local_n; i++) {
         local_row_ptr[i] -= offset; // local
     }
+
+
+    // times to measure
+    double spmv_time = 0.0;
+    double comm_time = 0.0;
+    double rotate_time = 0.0;
+    double normalize_time = 0.0;
 
 
     // Phase 1: initialize the vector used by the iterative method (SEQUENTIAL)
@@ -246,17 +292,29 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
                     row_shift = (row_shift + shift_rows) % n;
                 }
 
+                auto t0 = std::chrono::steady_clock::now();
                 // generate tasks for the iteration of SpMV
                 local_spmv_csr(local_n, local_row_ptr, local_col_idx, local_values, x, local_out, num_local_chunks, chunk_size);
+                auto t1 = std::chrono::steady_clock::now();
+                spmv_time += std::chrono::duration<double>(t1-t0).count();
 
+                t0 = std::chrono::steady_clock::now();
                 // gather results into a unique global result
                 MPI_Allgatherv(local_out.data(), local_n, MPI_DOUBLE, global_out.data(), row_counts.data(), row_displacements.data(), MPI_DOUBLE, MPI_COMM_WORLD);
+                t1 = std::chrono::steady_clock::now();
+                comm_time += std::chrono::duration<double>(t1-t0).count();
                 
+                t0 = std::chrono::steady_clock::now();
                 // distribute logic with shift rotation via tasks
                 rotate_vector(global_out, y, row_shift, num_chunks, chunk_size);
+                t1 = std::chrono::steady_clock::now();
+                rotate_time += std::chrono::duration<double>(t1-t0).count();
                 
+                t0 = std::chrono::steady_clock::now();
                 normalize(y, num_chunks, chunk_size);
                 // barrier -> only one thread from here
+                t1 = std::chrono::steady_clock::now();
+                normalize_time += std::chrono::duration<double>(t1-t0).count();
                 
                 x.swap(y);
             }
@@ -293,6 +351,13 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
             }
         }
     }
+
+    // get global time for each phase (take max since they work in parallel)
+    double global_spmv, global_comm, global_rotate, global_normalize;
+    MPI_Reduce(&spmv_time, &global_spmv, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&comm_time, &global_comm, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&rotate_time, &global_rotate, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&normalize_time, &global_normalize, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     
     // Keep the final vector only if we have to dump it.
     if (final_vector != nullptr && rank == 0) {
@@ -302,13 +367,22 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
     return IterativeResult{
         .rayleigh = rayleigh,
         .checksum = checksum,
-        .final_row_shift = row_shift
+        .final_row_shift = row_shift,
+        .global_spmv = global_spmv,
+        .global_comm = global_comm,
+        .global_rotate = global_rotate,
+        .global_normalize = global_normalize
     };
 }
 
 int main(int argc, char** argv) {
     int provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
+    if (provided < MPI_THREAD_FUNNELED) {
+        std::cerr << "Error on MPI_Init_thread" << std::endl;
+        MPI_Finalize();
+        return 1;
+    }
 
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -367,7 +441,7 @@ int main(int argc, char** argv) {
             std::cout << "generation_time_sec=" << generation_sec << "\n\n";
         }
 
-        std::vector<double>  final_vector;
+        std::vector<double> final_vector;
         std::vector<double>* final_vector_out = dump_vector_path.empty() ? nullptr : &final_vector;
 
         // barrier to make sure each rank is at the same point before counting time
@@ -376,7 +450,7 @@ int main(int argc, char** argv) {
         // Phase 2: timed iterative computation.
         const auto tc0 = std::chrono::steady_clock::now();
         
-        const IterativeResult result = distributed_iterative_spmv(rank, size, G.A, n, seed, num_threads, chunk_size, final_vector_out);
+        const IterativeResult result = distributed_iterative_spmv(rank, size, G.A, nz, n, seed, num_threads, chunk_size, final_vector_out);
         
         MPI_Barrier(MPI_COMM_WORLD);
         const auto tc1 = std::chrono::steady_clock::now();
@@ -389,7 +463,11 @@ int main(int argc, char** argv) {
             std::cout << "checksum=0x" << std::hex << result.checksum << std::dec << "\n";
 
             std::cout << std::fixed << std::setprecision(6);
-            std::cout << "Time (sec) = " << computation_sec << "\n";
+            std::cout << "Time (sec)" << std::endl << "computation=" << computation_sec << "\n";
+            std::cout << "global_spmv=" << result.global_spmv << std::endl;
+            std::cout << "global_comm=" << result.global_comm << std::endl;
+            std::cout << "global_rotate=" << result.global_rotate << std::endl;
+            std::cout << "global_normalize=" << result.global_normalize << std::endl;
 
             // Phase 3: optional correctness support. Vector dumping is outside the timed region
             if (!dump_vector_path.empty()) {

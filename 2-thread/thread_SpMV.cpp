@@ -81,7 +81,7 @@ static double dot(const std::vector<double>& a, const std::vector<double>& b, Th
                 for (std::uint64_t i = start; i < end; i++) {
                     local_sum += (a[i] * b[i]);
                 }
-                partial_sums[t].value = local_sum; // i add the local_sum variable because of cache invalidity
+                partial_sums[t].value = local_sum; // add the local_sum variable because of cache invalidity
             });
         }
     } else {
