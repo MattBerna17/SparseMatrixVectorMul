@@ -72,18 +72,6 @@ static bool read_arg_str(int argc, char** argv, const std::string& name, std::st
 }
 
 
-static std::uint64_t checksum_vector(const std::vector<double>& x) {
-    std::uint64_t acc = 0;
-
-    for (std::size_t i = 0; i < x.size(); ++i) {
-        std::uint64_t bits = 0;
-        std::memcpy(&bits, &x[i], sizeof(double));
-        acc ^= SplitMix64::mix(bits ^ SplitMix64::mix(i));
-    }
-
-    return acc;
-}
-
 
 static void dump_vector(const std::string& path, const std::vector<double>& x) {
     std::ofstream out(path);

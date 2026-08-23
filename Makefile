@@ -7,6 +7,7 @@ OMPFLAGS = -fopenmp
 SEQ = 1-sequential/seq
 THREAD = 2-thread/thread
 OPENMP = 3-openmp/omp
+OPENMP_WORKSHARING = 3-openmp/omp_worksharing
 MPI_OMP = 4-mpi_omp/mpi_omp
 
 .PHONY: all clean
@@ -15,7 +16,8 @@ all: clean
 	$(CXX) $(CXXFLAGS) 1-sequential/iterative_SpMV.cpp -o $(SEQ)
 	$(CXX) $(CXXFLAGS) 2-thread/thread_SpMV.cpp -o $(THREAD)
 	$(CXX) $(CXXFLAGS) 3-openmp/openmp_SpMV.cpp -o $(OPENMP) $(OMPFLAGS)
+	$(CXX) $(CXXFLAGS) 3-openmp/openmp_SpMV_worksharing.cpp -o $(OPENMP_WORKSHARING) $(OMPFLAGS)
 	$(MPICXX) $(CXXFLAGS) 4-mpi_omp/mpi_omp_SpMV.cpp -o $(MPI_OMP) $(OMPFLAGS)
 
 clean:
-	rm -f $(SEQ) $(THREAD) $(OPENMP) $(MPI_OMP)
+	rm -f $(SEQ) $(THREAD) $(OPENMP) $(OPENMP_WORKSHARING) $(MPI_OMP)

@@ -133,7 +133,7 @@ static void local_spmv_csr(int local_n, const std::vector<std::uint64_t>& local_
 }
 
 // rotate and transfer global results logic
-rotate_vector(const std::vector<double>& global_out, std::vector<double>& y, std::size_t row_shift, std::uint64_t num_chunks, std::uint64_t chunk_size) {
+static void rotate_vector(const std::vector<double>& global_out, std::vector<double>& y, std::size_t row_shift, std::uint64_t num_chunks, std::uint64_t chunk_size) {
     std::uint64_t n = global_out.size();
     for (std::uint64_t chunk = 0; chunk < num_chunks; chunk++) {
         std::uint64_t start = chunk_size * chunk;
@@ -178,7 +178,7 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
         std::uint64_t curr_rank = 0;
         for (size_t i = 0; i < n; i++) {
             auto row_nnz = global_A.row_ptr[i+1] - global_A.row_ptr[i];
-            if (curr_nnz + row_nnz > desired_nnz_per_rank && curr_rank < num_ranks - 1) {
+            if (curr_nnz + row_nnz > desired_nnz_per_rank && curr_rank < static_cast<std::uint64_t>(num_ranks - 1)) {
                 // custom function to return absolute difference in case of uint64
                 auto abs_diff = [](std::uint64_t a, std::uint64_t b) -> std::uint64_t {
                     return a > b ? a - b : b - a;
