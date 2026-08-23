@@ -1,4 +1,4 @@
-// OpenMP implementation of the Iterative Sparse Matrix-Vector Computation on Evolving Sparse Matrices
+// OpenMP TASK BASED implementation of the Iterative Sparse Matrix-Vector Computation on Evolving Sparse Matrices
 //
 // 
 // Command line:
@@ -8,6 +8,8 @@
 //   -s  seed     optional seed, default 111
 //   --dump-vector FILE
 //                 optional dump of the final normalized vector
+//   -t T         number of threads to use
+//   --chunk-size   number of rows to compute contained in a task
 //
 // Minimal build:
 //   g++ -O3 -std=c++20 -I . -Wall openmp_SpMV.cpp -o omp -fopenmp

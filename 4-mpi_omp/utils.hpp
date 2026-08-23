@@ -112,5 +112,6 @@ static void usage(const char* prog) {
         << "  -m   Matrix mode: regular or irregular\n"
         << "  -s   Optional seed, default 111\n"
         << "  --dump-vector FILE\n"
-        << "       Optional output file for the final normalized vector\n";
+        << "       Optional output file for the final normalized vector\n"
+        << "  -t   Number of OpenMP threads\n";
 }

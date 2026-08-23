@@ -1,19 +1,6 @@
 // Thread version of the Sparse Matrix-Vector multiplication
 
-// tools used:
-//      threadpool: because of the fixed number of elements (A is nxn, x is n, y is n) with a fixed number of threads (<= n, TO EXPLORE, but still power of 2)
-//      packaged_task: to create the tasks to solve
-//      futures and promises?
-
-// questions:
-//      what synchronization primitive should i use? semaphores? cvs? the impact?
-//      synchronization barriers between two particular steps
-
-// to analyze with experiments:
-//      best number of threads to use
-//      impact of nnz and mode (for workload per thread: try static with cyclical and block, but also dynamic, see which one performs better -> expected static with block because of locality and low synchronization overhead)
-//      optimizations: consider the cache's block dimension and try cold vs warm approach
-//      strong & weak scaling
+// uses threadpool to generate a fixed number of workers and assign them the tasks in the task queue
 
 //
 // Command line:
@@ -25,7 +12,7 @@
 //                  optional dump of the final normalized vector
 //   -t T           number of threads to use
 //   --scheduling   static | dynamic
-//   --chunk-size   number of elements to compute contained in a chunk (task assigned to a thread). ONLY WORKS WITH DYNAMIC SCHEDULING, with static chunk-size = N / T with remainder for the first N % T threads
+//   --chunk-size   number of rows to compute contained in a chunk (task assigned to a thread). ONLY WORKS WITH DYNAMIC SCHEDULING, with static chunk-size = N / T with remainder for the first N % T threads
 //
 // Minimal build:
 //   g++ -O3 -std=c++20 -I . -Wall thread_SpMV.cpp -o thread
@@ -75,7 +62,6 @@ static double dot(const std::vector<double>& a, const std::vector<double>& b, Th
         // in case of static scheduling
         for (std::uint64_t t = 0; t < tp.num_threads; t++) {
             auto [start, end] = get_static_range(a.size(), tp.num_threads, t);
-            
             tp.enqueue([&a, &b, t, &partial_sums, start, end] {
                 double local_sum = 0;
                 for (std::uint64_t i = start; i < end; i++) {
@@ -122,18 +108,42 @@ static double l2_norm(const std::vector<double>& x, ThreadPool &tp, SchedulingPa
     return std::sqrt(dot(x, x, tp, sp));
 }
 
-static void normalize(std::vector<double>& x, ThreadPool &tp, SchedulingParameters &sp) {
+static void normalize(std::vector<double>& x, ThreadPool& tp, SchedulingParameters& sp) {
     const double nrm = l2_norm(x, tp, sp);
     const double inv = 1.0 / nrm;
 
-    for (std::uint64_t t = 0; t < tp.num_threads; t++) {
-        auto [start, end] = get_static_range(x.size(), tp.num_threads, t);
+    const std::uint64_t n = x.size();
+    const std::uint64_t T = tp.num_threads;
 
-        tp.enqueue([&x, t, start, end, inv] {
-            for (std::uint64_t i = start; i < end; i++) {
-                x[i] *= inv;
-            }
-        });
+    if (!sp.is_dynamic) {
+        for (std::uint64_t t = 0; t < T; ++t) {
+            auto [start, end] = get_static_range(n, T, t);
+
+            tp.enqueue([&x, start, end, inv] {
+                for (std::uint64_t i = start; i < end; ++i) {
+                    x[i] *= inv;
+                }
+            });
+        }
+    } else {
+        const std::uint64_t chunk_size = sp.chunk_size;
+        const std::uint64_t num_chunks = (n + chunk_size - 1) / chunk_size;
+        std::atomic<std::uint64_t> next_chunk{0};
+        for (std::uint64_t t = 0; t < T; ++t) {
+            tp.enqueue([&x, &next_chunk, n, chunk_size, num_chunks, inv] {
+                while (true) {
+                    const std::uint64_t chunk = next_chunk.fetch_add(1, std::memory_order_relaxed);
+                    if (chunk >= num_chunks) {
+                        break;
+                    }
+                    const std::uint64_t start = chunk * chunk_size;
+                    const std::uint64_t end = std::min(start + chunk_size, n);
+                    for (std::uint64_t i = start; i < end; ++i) {
+                        x[i] *= inv;
+                    }
+                }
+            });
+        }
     }
 
     tp.barrier();
@@ -171,8 +181,7 @@ static void spmv_csr_shifted_rows(const CSRMatrix& A, std::size_t row_shift, con
         y[i] = sum;
     };
     
-    std::atomic<std::size_t> next_chunk{0};
-
+    
     if (!sp.is_dynamic) {
         for (std::uint64_t t = 0; t < T; ++t) {
             auto [start, end] = get_static_range(n, T, t);
@@ -183,11 +192,13 @@ static void spmv_csr_shifted_rows(const CSRMatrix& A, std::size_t row_shift, con
             });
         }
     } else {
+        std::atomic<std::size_t> next_chunk{0}; // index of the next chunk to work on
         const std::uint64_t chunk_size = sp.chunk_size;
         const std::uint64_t num_chunks = (n + chunk_size - 1) / chunk_size;
 
         for (std::uint64_t t = 0; t < T; t++) {
             tp.enqueue([do_row, &next_chunk, n, chunk_size, num_chunks] {
+                // while there are still chunks to compute, work on them
                 while (true) {
                     const std::uint64_t chunk = next_chunk.fetch_add(1, std::memory_order_relaxed);
                     if (chunk >= num_chunks) {

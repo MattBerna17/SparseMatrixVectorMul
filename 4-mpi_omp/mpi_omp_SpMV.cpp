@@ -1,7 +1,7 @@
 // Hybrid MPI + OpenMP implementation of the Iterative Sparse Matrix-Vector Computation
 //
 // Command line:
-//   mpirun -np P ./mpi_omp -n N -nz K -m mode -t T --chunk-size C
+//   mpirun -n P ./mpi_omp -n N -nz K -m mode -t T --chunk-size C
 //
 // Minimal build:
 //   mpic++ -O3 -std=c++20 -I . -Wall mpi_omp_SpMV.cpp -o mpi_omp -fopenmp
@@ -17,6 +17,13 @@
 //   - The computation uses a fixed number of iterations.
 //   - The main workload is the irregular case.
 //
+
+// rank 0 initially defines the assignment of rows to ranks that minimizes the distance to the ideal assignment (assigning desired_nnz_per_rank to each rank) counting the number of nnz for each rank
+// then, rank 0 shares the csr data to the ranks, and then each rank computes its own local spmv
+// the results are then gathered together, and the y result vector is created
+// then the y vector is rotated according to the current value of row_shift, and gets normalized
+// as the last step, swap x and y, then go to the next iteration
+// the time is measured for each phase of the execution and is reduced using the max operator (execution time in parallel is the max of the executions of the single ranks)
 
 #include <chrono>
 #include <cstddef>
@@ -126,7 +133,7 @@ static void local_spmv_csr(int local_n, const std::vector<std::uint64_t>& local_
 }
 
 // rotate and transfer global results logic
-static void rotate_vector(const std::vector<double>& global_out, std::vector<double>& y, std::size_t row_shift, std::uint64_t num_chunks, std::uint64_t chunk_size) {
+rotate_vector(const std::vector<double>& global_out, std::vector<double>& y, std::size_t row_shift, std::uint64_t num_chunks, std::uint64_t chunk_size) {
     std::uint64_t n = global_out.size();
     for (std::uint64_t chunk = 0; chunk < num_chunks; chunk++) {
         std::uint64_t start = chunk_size * chunk;
@@ -146,6 +153,7 @@ struct IterativeResult {
     double rayleigh             = 0.0;
     std::uint64_t checksum      = 0;
     std::size_t final_row_shift = 0;
+    double global_epoch = 0.0;
     double global_spmv = 0.0;
     double global_comm = 0.0;
     double global_rotate = 0.0;
@@ -159,15 +167,7 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
     
     // divide data across the ranks (just define the number of rows to send to each rank)
     std::vector<int> row_counts(num_ranks), row_displacements(num_ranks);
-    // int reminder = static_cast<int>(n % num_ranks);
-    // int curr_displacement = 0;
-    // for (int i = 0; i < num_ranks; i++) {
-    //     row_counts[i] = static_cast<int>(n / num_ranks) + (i < reminder ? 1 : 0);
-    //     row_displacements[i] = curr_displacement;
-    //     curr_displacement += row_counts[i];
-    // }
-    // int local_n = row_counts[rank]; // each rank has its own portion of data to locally work on
-
+    
     if (rank == 0) {
         // starting from the row 0, assign each row to a rank
         // the optimal partitioning is assigning desired_nnz_per_rank nnzs to each rank (not always possibile if A is generated using an irregular pattern)
@@ -198,7 +198,7 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
         row_displacements[curr_rank] = curr_row;
     }
 
-    // no scatter because later on i need the complete row_counts and row_displacements arrays (easier to use broadcast in this case)
+    // no scatter because, later on, i need the complete row_counts and row_displacements arrays (easier to use broadcast in this case)
     MPI_Bcast(row_counts.data(), num_ranks, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(row_displacements.data(), num_ranks, MPI_INT, 0, MPI_COMM_WORLD);
     
@@ -249,6 +249,7 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
     double comm_time = 0.0;
     double rotate_time = 0.0;
     double normalize_time = 0.0;
+    double epoch_time = 0.0;
 
 
     // Phase 1: initialize the vector used by the iterative method (SEQUENTIAL)
@@ -278,8 +279,8 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
 
     #pragma omp parallel num_threads(num_threads) shared(x, y, local_out, global_out, local_values, local_col_idx, local_row_ptr, partial_checksums, row_shift, rayleigh, checksum, num_chunks, num_local_chunks, local_n, row_counts, row_displacements)
     {
-        // only one thread from here
-        #pragma omp single
+        // only the master thread enters here: MPI_THREAD_FUNNELED requires the master thread to execute the MPI calls only (NOT single)
+        #pragma omp master
         {
             // normalization of the initialized x vector
             normalize(x, num_chunks, chunk_size);
@@ -287,22 +288,29 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
 
             for (std::uint32_t iter = 0; iter < NUM_ITERS; ++iter) {
                 
+                auto t0 = std::chrono::steady_clock::now();
                 // only single thread does this work
                 if (iter > 0 && (iter % EPOCH_LEN) == 0) {
                     row_shift = (row_shift + shift_rows) % n;
                 }
-
-                auto t0 = std::chrono::steady_clock::now();
-                // generate tasks for the iteration of SpMV
-                local_spmv_csr(local_n, local_row_ptr, local_col_idx, local_values, x, local_out, num_local_chunks, chunk_size);
                 auto t1 = std::chrono::steady_clock::now();
-                spmv_time += std::chrono::duration<double>(t1-t0).count();
+                if (iter > 0 && (iter % EPOCH_LEN) == 0) {
+                    epoch_time += std::chrono::duration<double>(t1-t0).count();
+                }
+
 
                 t0 = std::chrono::steady_clock::now();
+                // generate tasks for the iteration of SpMV
+                local_spmv_csr(local_n, local_row_ptr, local_col_idx, local_values, x, local_out, num_local_chunks, chunk_size);
+                t1 = std::chrono::steady_clock::now();
+                spmv_time += std::chrono::duration<double>(t1-t0).count();
+
+                double t_i, t_f;
+                t_i = MPI_Wtime();
                 // gather results into a unique global result
                 MPI_Allgatherv(local_out.data(), local_n, MPI_DOUBLE, global_out.data(), row_counts.data(), row_displacements.data(), MPI_DOUBLE, MPI_COMM_WORLD);
-                t1 = std::chrono::steady_clock::now();
-                comm_time += std::chrono::duration<double>(t1-t0).count();
+                t_f = MPI_Wtime();
+                comm_time += t_f - t_i;
                 
                 t0 = std::chrono::steady_clock::now();
                 // distribute logic with shift rotation via tasks
@@ -353,7 +361,8 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
     }
 
     // get global time for each phase (take max since they work in parallel)
-    double global_spmv, global_comm, global_rotate, global_normalize;
+    double global_epoch, global_spmv, global_comm, global_rotate, global_normalize;
+    MPI_Reduce(&epoch_time, &global_epoch, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(&spmv_time, &global_spmv, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(&comm_time, &global_comm, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(&rotate_time, &global_rotate, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
@@ -368,6 +377,7 @@ static IterativeResult distributed_iterative_spmv(int rank, int num_ranks, const
         .rayleigh = rayleigh,
         .checksum = checksum,
         .final_row_shift = row_shift,
+        .global_epoch = global_epoch,
         .global_spmv = global_spmv,
         .global_comm = global_comm,
         .global_rotate = global_rotate,
@@ -448,7 +458,7 @@ int main(int argc, char** argv) {
         MPI_Barrier(MPI_COMM_WORLD);
         
         // Phase 2: timed iterative computation.
-        const auto tc0 = std::chrono::steady_clock::now();
+        const auto tc0 = std::chrono::steady_clock::now(); // i still measure the distribution of the matrix etc because it's always necessary when executing with MPI+OMP
         
         const IterativeResult result = distributed_iterative_spmv(rank, size, G.A, nz, n, seed, num_threads, chunk_size, final_vector_out);
         
@@ -465,6 +475,7 @@ int main(int argc, char** argv) {
             std::cout << std::fixed << std::setprecision(6);
             std::cout << "Time (sec)" << std::endl << "computation=" << computation_sec << "\n";
             std::cout << "global_spmv=" << result.global_spmv << std::endl;
+            std::cout << "global_epoch=" << result.global_epoch << std::endl;
             std::cout << "global_comm=" << result.global_comm << std::endl;
             std::cout << "global_rotate=" << result.global_rotate << std::endl;
             std::cout << "global_normalize=" << result.global_normalize << std::endl;
