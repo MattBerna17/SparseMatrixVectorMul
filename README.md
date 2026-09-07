@@ -20,6 +20,7 @@ experiments_scripts/  scripts used to run the experiments and produce the
 ```
 
 ## Build
+Inside the target node acquired via `salloc -w node0x --time=hh:mm:ss` and then enter it using `ssh node0x`. Next, execute the following commands:
 
 ```
 make        # builds seq, thread, omp, omp_worksharing, mpi_omp
@@ -81,5 +82,5 @@ The scripts in `experiments_scripts/` run the executables on the spmcluster
 and collect results into CSV files. `plot_results.py` regenerates the plots
 included in the report. Each `run_*.py` script targets one experiment
 (strong/weak scaling, speedup, scheduling comparison, MPI phase breakdown,
-rank/thread interaction) and can be run independently. See the header of
+rank/thread interaction) and can be run independently. Before executing each script, a node (or up to 4 with MPI experiments) has to be reserved using the `salloc` command, but **the scripts are designed to be executed from the login node**, specifying the nodes using the command line parameter. See the header of
 each script for its specific arguments.
